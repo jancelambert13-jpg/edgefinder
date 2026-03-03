@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Sports Betting Recommendations</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        .positive { color: green; }
+        .negative { color: red; }
+        h1 { color: #333; }
+        .loading { display: none; }
+    </style>
+    <script>
+        async function loadRecommendations() {
+            document.getElementById('loading').style.display = 'block';
+            try {
+                const response = await fetch('/api/recommendations');
+                const data = await response.json();
+                displayRecommendations(data);
+            } catch (error) {
+                console.error('Error:', error);
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        }
+
+        function displayRecommendations(data) {
+            const tbody = document.getElementById('recommendations-body');
+            tbody.innerHTML = '';
+            if (data.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7">No value bets found at this time.</td></tr>';
+                return;
+            }
+            data.forEach(item => {
+                const row = tbody.insertRow();
+                row.insertCell().textContent = item.sport;
+                row.insertCell().textContent = item.game;
+                row.insertCell().textContent = item.bet;
+                row.insertCell().textContent = item.model_prob;
+                row.insertCell().textContent = item.market_prob;
+                row.insertCell().textContent = item.odds;
+                const valueCell = row.insertCell();
+                valueCell.textContent = item.value;
+                valueCell.className = item.value > 0 ? 'positive' : 'negative';
+            });
+        }
+
+        window.onload = loadRecommendations;
+    </script>
+</head>
+<body>
+    <h1>🏆 AI Sports Betting Recommendations</h1>
+    <p>Value bets where AI probability exceeds market implied probability.</p>
+    <div id="loading" class="loading">Loading recommendations...</div>
+    <table>
+        <thead>
+            <tr>
+                <th>Sport</th>
+                <th>Game</th>
+                <th>Bet On</th>
+                <th>AI Probability</th>
+                <th>Market Probability</th>
+                <th>Odds</th>
+                <th>Value (AI - Market)</th>
+            </tr>
+        </thead>
+        <tbody id="recommendations-body">
+            <tr><td colspan="7">Loading...</td></tr>
+        </tbody>
+    </table>
+</body>
+</html>
