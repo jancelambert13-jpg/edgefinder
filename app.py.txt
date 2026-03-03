@@ -6,145 +6,154 @@ from collections import defaultdict
 
 app = Flask(__name__)
 
-# Configuration
+# Configuration — set ODDS_API_KEY in Render's Environment panel
 API_KEY = os.environ.get('ODDS_API_KEY')
-if not API_KEY:
-    raise ValueError("Please set ODDS_API_KEY environment variable")
 
 ODDS_API_URL = "https://api.the-odds-api.com/v4/sports/{sport}/odds/"
-SPORTS = ['americanfootball_nfl', 'basketball_nba', 'baseball_mlb']  # Add more as needed
+SPORTS = ['americanfootball_nfl', 'basketball_nba', 'baseball_mlb']
 
-# Simulated team power ratings (will be populated dynamically)
-team_ratings = defaultdict(lambda: 50.0)  # default rating 50
+# Team power ratings (default 50, updated from fetched games)
+team_ratings = defaultdict(lambda: 50.0)
+
 
 def update_team_ratings_from_games(games):
-    """
-    Update team ratings based on game outcomes (if available) - here we simulate
-    by slightly adjusting based on recent performance.
-    In a real system, you'd use historical data and ML.
-    """
-    # For demo, we just ensure teams exist; ratings stay constant for simplicity
+    """Ensure all teams in fetched games have a rating entry."""
     for game in games:
-        home_team = game['home_team']
-        away_team = game['away_team']
-        # Initialize if not present
-        if home_team not in team_ratings:
-            team_ratings[home_team] = 50.0
-        if away_team not in team_ratings:
-            team_ratings[away_team] = 50.0
+        # defaultdict auto-initialises, but touch both keys to populate
+        _ = team_ratings[game['home_team']]
+        _ = team_ratings[game['away_team']]
+
 
 def predict_winner_probability(home_team, away_team):
     """
-    AI model: logistic function based on team ratings and home advantage.
-    Returns probability that home team wins.
+    Logistic model: converts rating difference + home advantage to a win probability.
+    Returns probability that the HOME team wins (0-1).
     """
-    rating_home = team_ratings[home_team]
-    rating_away = team_ratings[away_team]
-    home_advantage = 5.0  # constant boost for home team
-    rating_diff = rating_home - rating_away + home_advantage
-    # Logistic function: 1 / (1 + exp(-rating_diff / scale))
-    scale = 10.0  # scales the rating difference to probability
-    prob_home = 1.0 / (1.0 + math.exp(-rating_diff / scale))
+    rating_diff = team_ratings[home_team] - team_ratings[away_team] + 5.0  # 5pt home advantage
+    prob_home = 1.0 / (1.0 + math.exp(-rating_diff / 10.0))
     return prob_home
+
 
 def implied_probability(american_odds):
     """
-    Convert American odds to implied probability.
-    Positive odds: 100 / (odds + 100)
-    Negative odds: -odds / (-odds + 100)
+    Convert American moneyline odds to implied probability.
+      Positive (e.g. +150):  100 / (odds + 100)
+      Negative (e.g. -200):  |odds| / (|odds| + 100)
     """
     if american_odds > 0:
         return 100 / (american_odds + 100)
     else:
-        return -american_odds / (-american_odds + 100)
+        abs_odds = abs(american_odds)
+        return abs_odds / (abs_odds + 100)
+
 
 def fetch_games(sport):
-    """Fetch upcoming games from The Odds API for a given sport."""
+    """Fetch upcoming moneyline odds from The Odds API."""
+    if not API_KEY:
+        print("Warning: ODDS_API_KEY not set — skipping API call.")
+        return []
     params = {
         'apiKey': API_KEY,
-        'regions': 'us',  # US odds
-        'markets': 'h2h',  # moneyline (head-to-head)
+        'regions': 'us',
+        'markets': 'h2h',
         'oddsFormat': 'american',
-        'dateFormat': 'iso'
+        'dateFormat': 'iso',
     }
-    url = ODDS_API_URL.format(sport=sport)
-    response = requests.get(url, params=params)
-    if response.status_code != 200:
-        print(f"Error fetching {sport}: {response.status_code}")
+    try:
+        response = requests.get(
+            ODDS_API_URL.format(sport=sport),
+            params=params,
+            timeout=10,
+        )
+        if response.status_code != 200:
+            print(f"Error fetching {sport}: {response.status_code} — {response.text[:200]}")
+            return []
+        return response.json()
+    except requests.RequestException as e:
+        print(f"Request failed for {sport}: {e}")
         return []
-    return response.json()
+
 
 def analyze_games(games):
     """
-    For each game, compute model probability and compare with market.
-    Return list of value bets.
+    Compare model win probabilities against market implied probabilities.
+    Returns list of value-bet dicts sorted by edge (highest first).
     """
     recommendations = []
+
     for game in games:
         home_team = game['home_team']
         away_team = game['away_team']
-        # Get moneyline odds from the first bookmaker (simplified)
-        if not game['bookmakers']:
+
+        if not game.get('bookmakers'):
             continue
-        bookmaker = game['bookmakers'][0]
-        outcomes = bookmaker['markets'][0]['outcomes']
-        # Find home and away odds
-        home_odds = None
-        away_odds = None
-        for outcome in outcomes:
-            if outcome['name'] == home_team:
-                home_odds = outcome['price']
-            elif outcome['name'] == away_team:
-                away_odds = outcome['price']
+
+        # Use the first bookmaker's h2h market
+        try:
+            outcomes = game['bookmakers'][0]['markets'][0]['outcomes']
+        except (IndexError, KeyError):
+            continue
+
+        home_odds = next((o['price'] for o in outcomes if o['name'] == home_team), None)
+        away_odds = next((o['price'] for o in outcomes if o['name'] == away_team), None)
+
         if home_odds is None or away_odds is None:
             continue
 
-        # Model probability
         prob_home = predict_winner_probability(home_team, away_team)
-        prob_away = 1 - prob_home
+        prob_away = 1.0 - prob_home
 
-        # Market implied probabilities
         imp_home = implied_probability(home_odds)
         imp_away = implied_probability(away_odds)
 
-        # Check for value (model > market)
+        game_label = f"{away_team} @ {home_team}"
+        sport_title = game.get('sport_title', sport)
+
         if prob_home > imp_home:
             recommendations.append({
-                'sport': game['sport_title'],
-                'game': f"{away_team} @ {home_team}",
+                'sport': sport_title,
+                'game': game_label,
                 'bet': home_team,
                 'model_prob': round(prob_home, 3),
                 'market_prob': round(imp_home, 3),
                 'odds': home_odds,
-                'value': round(prob_home - imp_home, 3)
+                'value': round(prob_home - imp_home, 3),
             })
+
         if prob_away > imp_away:
             recommendations.append({
-                'sport': game['sport_title'],
-                'game': f"{away_team} @ {home_team}",
+                'sport': sport_title,
+                'game': game_label,
                 'bet': away_team,
                 'model_prob': round(prob_away, 3),
                 'market_prob': round(imp_away, 3),
                 'odds': away_odds,
-                'value': round(prob_away - imp_away, 3)
+                'value': round(prob_away - imp_away, 3),
             })
+
+    recommendations.sort(key=lambda x: x['value'], reverse=True)
     return recommendations
+
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
+
 @app.route('/api/recommendations')
 def get_recommendations():
+    if not API_KEY:
+        return jsonify({'error': 'ODDS_API_KEY environment variable is not set.'}), 500
+
     all_recommendations = []
     for sport in SPORTS:
         games = fetch_games(sport)
         update_team_ratings_from_games(games)
-        recommendations = analyze_games(games)
-        all_recommendations.extend(recommendations)
-    # Sort by value (highest first)
+        all_recommendations.extend(analyze_games(games))
+
     all_recommendations.sort(key=lambda x: x['value'], reverse=True)
     return jsonify(all_recommendations)
+
 
 if __name__ == '__main__':
     app.run(debug=True)
